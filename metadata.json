@@ -1,0 +1,6 @@
+{
+  "name": "Drawing Gallery",
+  "description": "A beautiful personal drawing portfolio and gallery website with secure admin management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
