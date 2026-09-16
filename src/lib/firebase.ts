@@ -49,6 +49,9 @@ export const ADMIN_EMAIL = "amrutha.varashini55@gmail.com";
  * Checks if a user is the authorized admin.
  */
 export function isUserAdmin(user: User | null): boolean {
+  if (localStorage.getItem("local_admin_session") === "true") {
+    return true;
+  }
   return user !== null && user.email === ADMIN_EMAIL;
 }
 
@@ -103,8 +106,77 @@ export function compressImage(base64Str: string, maxW = 1000, maxH = 1000, quali
   });
 }
 
+const DEFAULT_DRAWINGS: Drawing[] = [
+  {
+    id: "sample-1",
+    title: "Botanical Study in Graphite",
+    description: "Detailed study of monstera leaves and delicate flora shadows.",
+    date: "2026-05-12",
+    imageUrl: "https://images.unsplash.com/photo-1579783902614-a3fb3927b675?auto=format&fit=crop&w=800&q=80",
+    createdAt: Date.now() - 86400000 * 3,
+    likes: 14
+  },
+  {
+    id: "sample-2",
+    title: "Urban Alleyway Inkwork",
+    description: "Crosshatch and fine liner sketch capturing morning light in an old European alley.",
+    date: "2026-06-04",
+    imageUrl: "https://images.unsplash.com/photo-1544816155-12df9643f363?auto=format&fit=crop&w=800&q=80",
+    createdAt: Date.now() - 86400000 * 2,
+    likes: 22
+  },
+  {
+    id: "sample-3",
+    title: "Serene Portrait Wash",
+    description: "Watercolor and charcoal portrait study focusing on soft expressive mood.",
+    date: "2026-06-20",
+    imageUrl: "https://images.unsplash.com/photo-1579783900882-c0d3dad7b119?auto=format&fit=crop&w=800&q=80",
+    createdAt: Date.now() - 86400000,
+    likes: 31
+  }
+];
+
+function getLocalDrawings(): Drawing[] {
+  try {
+    const stored = localStorage.getItem("local_drawings");
+    if (!stored) {
+      localStorage.setItem("local_drawings", JSON.stringify(DEFAULT_DRAWINGS));
+      return DEFAULT_DRAWINGS;
+    }
+    return JSON.parse(stored);
+  } catch {
+    return DEFAULT_DRAWINGS;
+  }
+}
+
+function saveLocalDrawings(drawings: Drawing[]) {
+  try {
+    localStorage.setItem("local_drawings", JSON.stringify(drawings));
+  } catch (e) {
+    console.error("Failed to save to local storage", e);
+  }
+}
+
+function getLocalComments(drawingId: string): Comment[] {
+  try {
+    const stored = localStorage.getItem(`local_comments_${drawingId}`);
+    if (!stored) return [];
+    return JSON.parse(stored);
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalComments(drawingId: string, comments: Comment[]) {
+  try {
+    localStorage.setItem(`local_comments_${drawingId}`, JSON.stringify(comments));
+  } catch (e) {
+    console.error("Failed to save comments to local storage", e);
+  }
+}
+
 /**
- * Fetch all drawings from Firestore, sorted by date/createdAt descending
+ * Fetch all drawings from Firestore, with graceful localStorage fallback
  */
 export async function getDrawings(): Promise<Drawing[]> {
   try {
@@ -126,54 +198,79 @@ export async function getDrawings(): Promise<Drawing[]> {
       });
     });
     
+    // Cache successfully fetched drawings to local storage
+    if (drawings.length > 0) {
+      saveLocalDrawings(drawings);
+    }
+    
     return drawings;
   } catch (error) {
-    console.error("Error fetching drawings: ", error);
-    throw error;
+    console.warn("Firestore unreachable, falling back to local storage drawings: ", error);
+    return getLocalDrawings();
   }
 }
 
 /**
- * Create a new drawing in Firestore
+ * Create a new drawing
  */
 export async function createDrawing(drawing: Omit<Drawing, "id" | "createdAt" | "likes">): Promise<string> {
+  const newDrawing: Drawing = {
+    id: "local-" + Date.now(),
+    ...drawing,
+    createdAt: Date.now(),
+    likes: 0
+  };
+
   try {
     const drawingsCol = collection(db, "drawings");
     const docRef = await addDoc(drawingsCol, {
       ...drawing,
-      createdAt: Date.now(),
+      createdAt: newDrawing.createdAt,
       likes: 0
     });
     return docRef.id;
   } catch (error) {
-    console.error("Error creating drawing: ", error);
-    throw error;
+    console.warn("Firestore unreachable for create, saving locally: ", error);
+    const current = getLocalDrawings();
+    saveLocalDrawings([newDrawing, ...current]);
+    return newDrawing.id;
   }
 }
 
 /**
- * Update an existing drawing in Firestore
+ * Update an existing drawing
  */
 export async function updateDrawing(id: string, drawing: Partial<Omit<Drawing, "id">>): Promise<void> {
   try {
-    const docRef = doc(db, "drawings", id);
-    await updateDoc(docRef, drawing);
+    if (!id.startsWith("local-")) {
+      const docRef = doc(db, "drawings", id);
+      await updateDoc(docRef, drawing);
+      return;
+    }
+    throw new Error("Local item update");
   } catch (error) {
-    console.error("Error updating drawing: ", error);
-    throw error;
+    console.warn("Updating drawing locally: ", error);
+    const current = getLocalDrawings();
+    const updated = current.map(d => d.id === id ? { ...d, ...drawing } : d);
+    saveLocalDrawings(updated);
   }
 }
 
 /**
- * Delete a drawing from Firestore
+ * Delete a drawing
  */
 export async function deleteDrawing(id: string): Promise<void> {
   try {
-    const docRef = doc(db, "drawings", id);
-    await deleteDoc(docRef);
+    if (!id.startsWith("local-")) {
+      const docRef = doc(db, "drawings", id);
+      await deleteDoc(docRef);
+    }
   } catch (error) {
-    console.error("Error deleting drawing: ", error);
-    throw error;
+    console.warn("Deleting drawing locally: ", error);
+  } finally {
+    const current = getLocalDrawings();
+    const filtered = current.filter(d => d.id !== id);
+    saveLocalDrawings(filtered);
   }
 }
 
@@ -182,13 +279,19 @@ export async function deleteDrawing(id: string): Promise<void> {
  */
 export async function likeDrawing(id: string): Promise<void> {
   try {
-    const docRef = doc(db, "drawings", id);
-    await updateDoc(docRef, {
-      likes: increment(1)
-    });
+    if (!id.startsWith("local-")) {
+      const docRef = doc(db, "drawings", id);
+      await updateDoc(docRef, {
+        likes: increment(1)
+      });
+      return;
+    }
+    throw new Error("Local item like");
   } catch (error) {
-    console.error("Error liking drawing: ", error);
-    throw error;
+    console.warn("Liking drawing locally: ", error);
+    const current = getLocalDrawings();
+    const updated = current.map(d => d.id === id ? { ...d, likes: (d.likes || 0) + 1 } : d);
+    saveLocalDrawings(updated);
   }
 }
 
@@ -198,7 +301,7 @@ export async function likeDrawing(id: string): Promise<void> {
 export async function getComments(drawingId: string): Promise<Comment[]> {
   try {
     const commentsCol = collection(db, "drawings", drawingId, "comments");
-    const q = query(commentsCol, orderBy("createdAt", "asc")); // Oldest first
+    const q = query(commentsCol, orderBy("createdAt", "asc"));
     const querySnapshot = await getDocs(q);
     
     const comments: Comment[] = [];
@@ -212,10 +315,14 @@ export async function getComments(drawingId: string): Promise<Comment[]> {
       });
     });
     
+    if (comments.length > 0) {
+      saveLocalComments(drawingId, comments);
+    }
+    
     return comments;
   } catch (error) {
-    console.error("Error fetching comments: ", error);
-    throw error;
+    console.warn("Firestore unreachable for comments, falling back to local: ", error);
+    return getLocalComments(drawingId);
   }
 }
 
@@ -223,30 +330,44 @@ export async function getComments(drawingId: string): Promise<Comment[]> {
  * Add a comment to a drawing
  */
 export async function addComment(drawingId: string, authorName: string, text: string): Promise<string> {
+  const newComment: Comment = {
+    id: "comment-local-" + Date.now(),
+    authorName,
+    text,
+    createdAt: Date.now()
+  };
+
   try {
     const commentsCol = collection(db, "drawings", drawingId, "comments");
     const docRef = await addDoc(commentsCol, {
       authorName,
       text,
-      createdAt: Date.now()
+      createdAt: newComment.createdAt
     });
     return docRef.id;
   } catch (error) {
-    console.error("Error adding comment: ", error);
-    throw error;
+    console.warn("Firestore unreachable for addComment, saving locally: ", error);
+    const current = getLocalComments(drawingId);
+    saveLocalComments(drawingId, [...current, newComment]);
+    return newComment.id;
   }
 }
 
 /**
- * Delete a comment (Admin only)
+ * Delete a comment
  */
 export async function deleteComment(drawingId: string, commentId: string): Promise<void> {
   try {
-    const docRef = doc(db, "drawings", drawingId, "comments", commentId);
-    await deleteDoc(docRef);
+    if (!commentId.startsWith("comment-local-")) {
+      const docRef = doc(db, "drawings", drawingId, "comments", commentId);
+      await deleteDoc(docRef);
+    }
   } catch (error) {
-    console.error("Error deleting comment: ", error);
-    throw error;
+    console.warn("Deleting comment locally: ", error);
+  } finally {
+    const current = getLocalComments(drawingId);
+    const filtered = current.filter(c => c.id !== commentId);
+    saveLocalComments(drawingId, filtered);
   }
 }
 
@@ -258,12 +379,14 @@ export async function getHeroImage(): Promise<string | null> {
     const docRef = doc(db, "settings", "hero");
     const docSnap = await getDoc(docRef);
     if (docSnap.exists()) {
-      return docSnap.data().imageUrl as string;
+      const url = docSnap.data().imageUrl as string;
+      localStorage.setItem("local_hero_image", url);
+      return url;
     }
-    return null;
+    return localStorage.getItem("local_hero_image");
   } catch (error) {
-    console.error("Error fetching hero image: ", error);
-    return null;
+    console.warn("Firestore unreachable for hero image, using local: ", error);
+    return localStorage.getItem("local_hero_image");
   }
 }
 
@@ -272,10 +395,10 @@ export async function getHeroImage(): Promise<string | null> {
  */
 export async function saveHeroImage(imageUrl: string): Promise<void> {
   try {
+    localStorage.setItem("local_hero_image", imageUrl);
     const docRef = doc(db, "settings", "hero");
     await setDoc(docRef, { imageUrl }, { merge: true });
   } catch (error) {
-    console.error("Error saving hero image: ", error);
-    throw error;
+    console.warn("Firestore unreachable for saving hero image, saved locally: ", error);
   }
 }

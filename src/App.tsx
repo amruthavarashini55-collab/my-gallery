@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { onAuthStateChanged, signOut, User } from "firebase/auth";
+import { onAuthStateChanged, signOut, getRedirectResult, User } from "firebase/auth";
 import { auth, getDrawings, isUserAdmin } from "./lib/firebase";
 import { Drawing } from "./types";
 import { Loader2, Palette, ShieldAlert } from "lucide-react";
@@ -33,8 +33,12 @@ export default function App() {
     }
   };
 
-  // Setup Firebase Auth State Listener
+  // Setup Firebase Auth State Listener & Redirect Result handler
   useEffect(() => {
+    getRedirectResult(auth).catch((err) => {
+      console.error("Redirect result error:", err);
+    });
+
     const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
       setUser(currentUser);
       const checkAdmin = isUserAdmin(currentUser);
@@ -53,11 +57,16 @@ export default function App() {
   // Handle Logout
   const handleLogout = async () => {
     try {
+      localStorage.removeItem("local_admin_session");
       await signOut(auth);
       setIsAdmin(false);
       setUser(null);
       setCurrentView("public");
     } catch (err) {
+      localStorage.removeItem("local_admin_session");
+      setIsAdmin(false);
+      setUser(null);
+      setCurrentView("public");
       console.error("Logout failed: ", err);
     }
   };
